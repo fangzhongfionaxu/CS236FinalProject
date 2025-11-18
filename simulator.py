@@ -288,6 +288,7 @@ class EventHandle:
     def cancelled(self) -> bool:
         return self._cancelled
 
+#should be fine as is
 class Simulator:
     """Minimal discrete-event simulator.
     Subclass and override handle(event_id, payload) with a switch-case.
@@ -406,6 +407,7 @@ class Baseline(Simulator):
         elif event_id == SIMULATION_END: 
             self.handle_simulation_end(payload)
 
+    # probably less relevant because "requests" go in the opposite direction now
     def handle_car_request(self, payload: Any):
         car_id = payload['car_id']
         start = payload['start_node']
@@ -430,6 +432,7 @@ class Baseline(Simulator):
         self.schedule_at(self.now, CAR_ARRIVAL, start_payload)
             
 
+    # can probably reuse to an extent
     def handle_car_arrival(self, payload: Any):
         car_id = payload['car_id']
         curr_node = payload['at_node']
@@ -486,12 +489,14 @@ class Baseline(Simulator):
         }
         self.schedule_at(arrival_time, CAR_ARRIVAL, next_payload)
 
+    # can probably be reused (no more availsble dashers)
     def check_for_simulation_end(self):
         self.cars_finished_count += 1
         if self.cars_finished_count == self.num_cars:
             print(f"[{self.now:.2f}] All {self.num_cars} cars have finished. Scheduling end.")
             self.schedule_at(self.now, SIMULATION_END, None)
 
+    # can be exactly the same
     def handle_simulation_end(self, payload: Any):
         """
         Stops the simulation.
