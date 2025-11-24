@@ -30,8 +30,10 @@ class WeightedGraph:
             index_s = self.vertices.index(node1)
             if not any(neigh == node2 for neigh, _ in self.arcs[index_s]):
                 self.arcs[index_s].append((node2, weight))
+            
         else:
-            raise Exception("Not a valid edge")
+            print(f"Skipping invalid edge: {node1} → {node2} (weight={weight})")
+            return
 
     def modifyWeight(self, node1, node2, weight):
         '''Modify edge weight'''
@@ -244,6 +246,8 @@ def read_graph(fname):
         node2 = int(edge[1].strip())
         weight = float(edge[2].strip())
 
+        print(node1, node2, weight)
+
         graph.addEdge(node1, node2, weight)
     
     # Close the file safely after done reading
@@ -434,7 +438,7 @@ class Baseline(Simulator):
     # probably less relevant because "requests" go in the opposite direction now
     # -> yes this code ended up being much shorter (car request got repurposed into task arrival)
     def handle_task_arrival(self, payload: Any):
-        task = payload[task]
+        task = payload['task']
         self.available_tasks.append(task)        
 
     # can probably reuse to an extent
