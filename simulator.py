@@ -4,8 +4,8 @@ import heapq
 import itertools
 import random
 
-CAR_REQUEST = "CAR_REQUEST"
-CAR_ARRIVAL = "CAR_ARRIVAL"
+DASHER_ARRIVAL = "DASHER_ARRIVAL"
+TASK_ARRIVAL = "TASK_ARRIVAL"
 SIMULATION_END = "SIMULATION_END"
 
 class WeightedGraph:
@@ -250,23 +250,55 @@ def read_graph(fname):
     file.close()
     return graph
 
-def read_agents(fname):
+def read_dashers(fname):
     # Open the file
     file = open(fname, "r")
     # Set up your list of agents
-    agents=[]
+    dashers=[]
+
+    file.readline()
 
     # Next, read the agents and build the list
     for line in file:
         # agent is a list of 2 indices representing a pair of vertices
         # path[0] contains the start location (index between 0 and numVertices-1)
         # path[1] contains the destination location (index between 0 and numVertices-1)
-        path = line.strip().split(",")
-        agents.append((int(path[0]), int(path[1])))
+        data = line.strip().split(",")
+        dasher = {
+            'start_location': int(data[0]),
+            'start_time': int(data[1]),
+            'exit_time': int(data[2])
+        }
+        dashers.append(dasher)
     
     # Close the file safely after done reading
     file.close()
-    return agents
+    return dashers
+
+def read_tasks(fname, appear_time_fixed):
+    file = open(fname, "r")
+    tasks = []
+
+    file.readline()
+
+    task_id = 0
+    for line in file:
+        data = line.strip().split(",")
+        reward = random.randint(1, 100)
+        target_time = int(data[3])
+        appear_time = target_time - appear_time_fixed
+        task = {
+            'task_id': task_id,
+            'location': int(data[1]),
+            'appear_time': appear_time,
+            'target_time': target_time,
+            'reward': reward
+        }
+        tasks.append(task)
+        task_id += 1
+
+    file.close()
+    return tasks
 
 """
 simple_discrete_event_sim.py
@@ -351,186 +383,113 @@ class Simulator:
         raise NotImplementedError("Override handle(event_id, payload)")
 
 class Baseline(Simulator):
-# Generates a random integer N such that 1 <= N <= 10
-    def __init__(self, graph: WeightedGraph, car_requests: list):
+    def __init__(self, graph: WeightedGraph, dashers, tasks):
         super().__init__()
         self.graph = graph
-        self.car_requests = car_requests
-        self.edge_occ = defaultdict(int)
-        self.cars = {}
-        self.total_system_congestion = 0.0
-        self.car_id_count = 0
-        self.num_cars = len(self.car_requests)
-        self.cars_finished_count = 0
+        self.dashers_data = dashers
+        self.tasks_data = tasks
+        #initializing the simulation state
+        self.available_tasks = []
+        self.dashers = {}
+        self.total_score = 0.0
+        self.num_dashers = len(dashers)
+        self.dashers_exited = 0
 
-
+    #access tasklog here
     def start_simulation(self):
-        """Schedules the initial CAR_REQUEST events."""
-        current_t=0.0
-        for (start_node, end_node) in self.car_requests:
-            #If its not the first car, generate a random time
-            if self.car_id_count > 0:
-                inter_arrival_time = random.expovariate(1.0)
-                current_t += inter_arrival_time
+        """Initializes the simulation by scheduling initial events."""
+        # schedule all dashers' arrivals at their start locations
+        for i, dasher_info in enumerate(self.dashers_data):
+            dasher_id = i
+            self.dashers[dasher_id] = {
+                'location': dasher_info['start_location'],
+                'exit_time': dasher_info['exit_time'],
+                'status': 'available' #either 'available' or 'unavailable'
+            }
 
-            #assign its id
-            self.car_id_count += 1
-            car_id = self.car_id_count
-            
-            #payload encodes car info, ex. 'C1' in class
+            #schedule arrival in the system
             payload = {
-                'car_id': car_id,
-                'start_node': start_node,
-                'end_node': end_node
+                'dasher_id': dasher_id,
+                'location': dasher_info['start_location']
             }
-            # Schedule the car's arrival in the system
-            self.schedule_at(current_t, CAR_REQUEST, payload)
-            
-            #initialize car data for stats
-            self.cars[car_id] = {
-                'start': start_node,
-                'end': end_node,
-                'arrival_time': current_t,
-                'path': None,
-                'path_record': [],
-                'final_arrival_time': None #adding this just to track it
+            self.schedule_at(dasher_info['start_time'], DASHER_ARRIVAL, payload)
+        
+        # schedule all task arrivals
+        for task in self.tasks_data:
+            payload = {
+                'task': task
             }
+            self.schedule_at(task['appear_time'], TASK_ARRIVAL, payload)
 
     def handle(self, event_id: Any, payload: Any):
-
-        if event_id == CAR_REQUEST:
-            self.handle_car_request(payload)
+        if event_id == TASK_ARRIVAL:
+            self.handle_task_arrival(payload)
             
-        elif event_id == CAR_ARRIVAL:
-            self.handle_car_arrival(payload)
+        elif event_id == DASHER_ARRIVAL:
+            self.handle_dasher_arrival(payload)
             
         elif event_id == SIMULATION_END: 
             self.handle_simulation_end(payload)
 
     # probably less relevant because "requests" go in the opposite direction now
-    def handle_car_request(self, payload: Any):
-        car_id = payload['car_id']
-        start = payload['start_node']
-        end = payload['end_node']
-
-        car_path, base = self.graph.dijkstra_shortest_path(start, end)
-    
-        if not car_path:
-            print(f"No path found from {start} to {end} for Car {car_id}. Car removed.")
-            self.check_for_simulation_end()
-            return
-
-        self.cars[car_id]['path'] = car_path
-    
-        # Put car at start node 
-        # Activate the traversal
-        start_payload = {
-            'car_id': car_id,
-            'at_node': start,
-            'prev_node': None # Just started, no previous edge
-        }
-        self.schedule_at(self.now, CAR_ARRIVAL, start_payload)
-            
+    # -> yes this code ended up being much shorter (car request got repurposed into task arrival)
+    def handle_task_arrival(self, payload: Any):
+        task = payload[task]
+        self.available_tasks.append(task)        
 
     # can probably reuse to an extent
-    def handle_car_arrival(self, payload: Any):
-        car_id = payload['car_id']
-        curr_node = payload['at_node']
-        prev_node = payload['prev_node']
-        car_data = self.cars[car_id]
+    # -> actually this didn't end up resembling handle_car_arrival that much
+    def handle_dasher_arrival(self, payload: Any):
+        dasher_id = payload['dasher_id']
+        location = payload['location']
         
-        if prev_node is not None:
-            finished_edge = (prev_node, curr_node)
-            self.edge_occ[finished_edge] -= 1
+        #update dasher location and status
+        self.dashers[dasher_id]['location'] = location
+        self.dashers[dasher_id]['status'] = 'available'
 
-        if curr_node == car_data['end']:
-            print(f"[{self.now:.2f}] Car {car_id} reached destination {curr_node}.")
-            # need to record the finish time before returning if we add tracking the final arrival time
-            car_data['final_arrival_time'] = self.now
-            self.check_for_simulation_end()
+        # check if dasher has exited yet
+        if self.now >= self.dashers[dasher_id]['exit_time']:
+            self.dashers_exited += 1
+            if self.dashers_exited == self.num_dashers:
+                self.schedule_at(self.now, SIMULATION_END, None)
             return
-            
-        predetermined_path = car_data['path']
-        try:
-            curr_node_index = predetermined_path.index(curr_node)
-            next_node = predetermined_path[curr_node_index + 1]
-        except (ValueError, IndexError):
-            print(f" Car {car_id} at {curr_node}, path {predetermined_path} error.")
-            self.check_for_simulation_end()
-            return
-            
-        next_edge = (curr_node, next_node)
-        base_weight = self.graph.get_weight(curr_node, next_node)
-        
-        if base_weight is None:
-            print(f"Error: Edge ({curr_node}, {next_node}) not found")
-            return
-        
-        k = self.edge_occ[next_edge] + 1
-        self.edge_occ[next_edge] = k
-        
-        traversal_time = base_weight * k
-        
-        # Cost for this car is the time it took
-        car_data['path_record'].append((next_edge, traversal_time))
-        
-        # System congestion cost (marginal cost): w*(k^2) - w*((k-1)^2) = w*(2k - 1)
-        marginal_system_cost = base_weight * (2 * k - 1)
-        self.total_system_congestion += marginal_system_cost
-        
-        print(f"[{self.now:.2f}] Car {car_id} starting edge {next_edge}. (k={k}, T={traversal_time:.2f})")
 
-        # --- 6. Schedule arrival at the *next* node ---
-        arrival_time = self.now + traversal_time
-        next_payload = {
-            'car_id': car_id,
-            'at_node': next_node,
-            'prev_node': curr_node # This will be the edge to decrement
-        }
-        self.schedule_at(arrival_time, CAR_ARRIVAL, next_payload)
+        #find closest feasible/available task
+        closest_task = None
+        min_travel_time = float('inf')
+        for task in self.available_tasks:
+            path, travel_time = self.graph.dijkstra_shortest_path(location, task['location'])
 
-    # can probably be reused (no more availsble dashers)
-    def check_for_simulation_end(self):
-        self.cars_finished_count += 1
-        if self.cars_finished_count == self.num_cars:
-            print(f"[{self.now:.2f}] All {self.num_cars} cars have finished. Scheduling end.")
-            self.schedule_at(self.now, SIMULATION_END, None)
+            if path:
+                arrival_time = self.now + travel_time
 
-    # can be exactly the same
+                if arrival_time <= task['target_time'] and arrival_time <= self.dashers[dasher_id]['exit_time']:
+                    if travel_time < min_travel_time:
+                        min_travel_time = travel_time
+                        closest_task = task
+
+        if closest_task is not None:
+            self.dashers[dasher_id]['status'] = 'unavailable'
+            self.available_tasks.remove(closest_task)
+            self.total_score += closest_task['reward']
+            next_payload = {
+                'dasher_id': dasher_id,
+                'location': closest_task['location']
+            }
+            self.schedule_at(closest_task['target_time'], DASHER_ARRIVAL, next_payload)
+
+    # actually didn't need a check_for_simulation_end since it has a set end
+    # handle_simulation_end can be exactly the same
     def handle_simulation_end(self, payload: Any):
         """
         Stops the simulation.
         """
-        print(f"[{self.now:.2f}] SIMULATION_END event received. Stopping run loop.")
+        print("SIMULATION_END event received. Stopping run loop.")
         self.stop()
 
-    def print_statistics(self):
-        total_car_costs = 0.0
-        num_cars = 0
-        
-        for car_id, car in self.cars.items():
-            if not car['path_record']: 
-                continue
-                
-            num_cars += 1
-            path_str_list = []
-            car_total_cost = 0.0
-            
-            for (edge, time_taken) in car['path_record']:
-                path_str_list.append(f"({edge[0]}-{edge[1]},{time_taken:.2f})")
-                car_total_cost += time_taken
-            
-            path_str = ", ".join(path_str_list)
-            final_time = car.get('final_arrival_time', car['arrival_time'])
-            print(f"Car {car_id} ({car['start']}, {car['end']}), arrived at t={final_time:.2f}, with path {path_str}")
-            total_car_costs += car_total_cost
-            
-        avg_congestion = total_car_costs / num_cars 
-        
-        print(f"\nAverage congestion is {avg_congestion:.2f}")
-        print(f"Total congestion is {self.total_system_congestion:.2f}")
-        
-        return avg_congestion, self.total_system_congestion
+    def get_total_score(self):
+        """ return the total system score """
+        return self.total_score
 
 class Dasher_Baseline(Simulator):
 # Generates a random integer N such that 1 <= N <= 10
@@ -737,28 +696,24 @@ class Dasher_Baseline(Simulator):
 
 if __name__ == "__main__":
 ####used Gemini for this because I didn't really know how to write a main execution block
-    import sys
-    
-    if len(sys.argv) < 3:
-        print("Usage: python Simulator_Fixed.py <graph_file> <agents_file>")
-        sys.exit(1)
+## ^ this note was for the original version: new version was handwritten since I didn't
+## need to learn to use sys input or anything
+    graph_file = "project_files/grid100.txt"
+    dashers_file = "project_files/dashers.csv"
+    tasklog_file = "project_files/tasklog.csv"
+    # from the assignment doc... "we can choose to keep the 'appear time' fixed
+    # (e.g. appears 20min before its reported completion)". So I added this feature?
+    appear_time_fixed = 20
 
-    graph_file = sys.argv[1]
-    agents_file = sys.argv[2]
-
-    print(f"Loading graph from {graph_file}...")
     graph = read_graph(graph_file)
-    print(f"  Loaded {len(graph.getNodes())} nodes")
 
-    print(f"Loading agents from {agents_file}...")
-    agents = read_agents(agents_file)
-    print(f"  Loaded {len(agents)} car requests")
+    dashers = read_dashers(dashers_file)
 
-    print("\nStarting simulation...")
+    tasks = read_tasks(tasklog_file, appear_time_fixed)
 
-    sim = Baseline(graph, agents)
+    sim = Baseline(graph, dashers, tasks)
     sim.start_simulation()
     sim.run()
 
-    print("\nSimulation Results:")
-    sim.print_statistics()
+    total_score = sim.get_total_score()
+    print(f"\nTotal Score: {total_score:.2f}")
