@@ -4,6 +4,10 @@ import os
 import pandas as pd
 from prophet import Prophet
 import numpy as np
+import matplotlib.pyplot as plt
+
+#predict for ech location 
+#predict the reward at given time
 
 def _last_reward_col(df):
     cols = [c for c in df.columns if c.startswith("reward_run")]
@@ -48,6 +52,61 @@ def predict_reward_at(vertex, t_minute, df_path="project_files/tasklog_reward.cs
     future = pd.DataFrame({"ds": [t_dt]})
     forecast = m.predict(future)
     return float(forecast["yhat"].iloc[0])
+
+
+def predict_all_vertices(t_minute, df_path="project_files/tasklog_reward.csv", reward_col=None):
+    """
+    predict_reward_at all vertices: run prophet for all location
+    - vertex: value in VERTEX column
+    - t_minute: integer minutes (same units as 'minute' column)
+    Returns dataframe of predicted reward for task at all vertices at minute t_minute.
+    """
+    df = pd.read_csv(df_path)
+
+    if "minute" not in df.columns or "VERTEX" not in df.columns:
+        raise RuntimeError("CSV must contain 'minute' and 'VERTEX' columns")
+
+    reward_col = reward_col or _last_reward_col(df)
+
+    origin = pd.Timestamp("1970-01-01")
+    target_dt = origin + pd.to_timedelta(int(t_minute), unit="m")
+
+    predictions = []
+
+    for vertex, group in df.groupby("VERTEX"):
+        y = pd.to_numeric(group[reward_col], errors="coerce").dropna()
+
+        if len(y) == 0:
+            continue
+
+        if len(y) == 1:
+            pred = float(y.iloc[-1])
+            
+        else:
+            ds = origin + pd.to_timedelta(
+                group.loc[y.index, "minute"].astype(int),
+                unit="m"
+            )
+
+            ts = pd.DataFrame({"ds": ds, "y": y.values})
+
+            m = Prophet(
+                daily_seasonality=False,
+                weekly_seasonality=False,
+                yearly_seasonality=False
+            )
+            m.fit(ts)
+
+            future = pd.DataFrame({"ds": [target_dt]})
+            forecast = m.predict(future)
+            pred = max(0,float(forecast["yhat"].iloc[0]))
+
+        predictions.append({
+            "VERTEX": vertex,
+            "predicted_reward": pred
+        })
+
+    return pd.DataFrame(predictions)
 
 def read_tasks_and_write_rewards(input_fname, output_fname, appear_time_fixed):
     """
@@ -152,7 +211,67 @@ def append_rewards(input_fname, appear_time_fixed):
 
     print(f"Appended {new_reward_col} to {input_fname}")
 
+
+
+# def graph_by_location(predictions):
+
+def get_historical_rewards_by_time(time, df_path= "project_files/tasklog_reward.csv", reward_col=None) -> pd.DataFrame:
+    """
+    Extract historical rewards for all locations at a specific time (minute).
+    
+    Returns a DataFrame with columns ['VERTEX', 'historical_reward'].
+    """
+    df = pd.read_csv(df_path)
+    
+    if "minute" not in df.columns or "VERTEX" not in df.columns:
+        raise RuntimeError("CSV must contain 'minute' and 'VERTEX' columns")
+    
+    # Determine reward column
+    reward_col = reward_col or _last_reward_col(df)
+    
+    hist = []
+    for vertex, group in df.groupby("VERTEX"):
+        group = group[group["minute"] == time]
+        y = pd.to_numeric(group[reward_col], errors="coerce").dropna()
+        reward = float(y.iloc[-1]) if len(y) > 0 else 0  # set 0 if no data
+        hist.append({"VERTEX": vertex, "historical_reward": reward})
+    
+    return pd.DataFrame(hist)
+
+
+def graph_by_time(predictions: pd.DataFrame, historical_rewards: pd.DataFrame, time: int):
+    """
+    Bar Chart Graph predicted rewards for all vertices at a given time.
+    - x-axis: vertex (sorted ascending)
+    - y-axis: predicted reward
+    - color: blue for predicted, yellow for historical
+    """
+
+    # Merge predicted and historical rewards, sort by vertex
+    merged = pd.merge(predictions, historical_rewards, on="VERTEX", how="outer").fillna(0)
+    merged = merged.sort_values("VERTEX")
+    
+    vertices = merged['VERTEX'].astype(str)
+    predicted = merged['predicted_reward']
+    historical = merged['historical_reward']
+    
+    x = np.arange(len(vertices))
+    width = 0.35
+    
+    plt.figure(figsize=(14, 6))
+    plt.bar(x - width/2, predicted, width, label='Predicted', color='skyblue')
+    plt.bar(x + width/2, historical, width, label='Historical', color='gold')
+    
+    plt.xlabel('Vertex (Location ID)')
+    plt.ylabel('Reward')
+    plt.title(f'Predicted vs Historical Rewards at Time = {time}')
+    plt.xticks(x, vertices, rotation=90)
+    plt.legend()
+    plt.tight_layout()
+    plt.show()
+
 print("Writing file to:", os.path.abspath("project_files/tasklog_reward.csv"))
+
 
 read_tasks_and_write_rewards(
     "project_files/tasklog.csv",
@@ -165,6 +284,10 @@ append_rewards("project_files/tasklog_reward.csv", appear_time_fixed=20)
 
 # Example usage (when run as script)
 if __name__ == "__main__":
-    pred = predict_reward_at(45, 1161)
-    print(pred)
+    predictions = predict_all_vertices(1227)
+    historical_rewards = get_historical_rewards_by_time(1227)
+    graph_by_time(predictions,historical_rewards,1227 )
+    
+
+    print(predictions)
 
