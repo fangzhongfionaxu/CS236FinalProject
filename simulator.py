@@ -408,7 +408,8 @@ class Baseline(Simulator):
             self.dashers[dasher_id] = {
                 'location': dasher_info['start_location'],
                 'exit_time': dasher_info['exit_time'],
-                'status': 'available' #either 'available' or 'unavailable'
+                'status': 'available', #either 'available' or 'unavailable'
+                'current_task': None
             }
 
             #schedule arrival in the system
@@ -446,7 +447,13 @@ class Baseline(Simulator):
     def handle_dasher_arrival(self, payload: Any):
         dasher_id = payload['dasher_id']
         location = payload['location']
-        
+
+        # If dasher arrives at a task location, complete task
+        current_task = self.dashers[dasher_id].get('current_task')
+        if current_task is not None and location == current_task['location']:
+            self.total_score += current_task['reward'] #only updates the total_score if the dasher completes the task
+            self.dashers[dasher_id]['current_task'] = None
+
         #update dasher location and status
         self.dashers[dasher_id]['location'] = location
         self.dashers[dasher_id]['status'] = 'available'
@@ -462,7 +469,9 @@ class Baseline(Simulator):
         closest_task = None
         min_travel_time = float('inf')
         for task in self.available_tasks:
-            path, travel_time = self.graph.dijkstra_shortest_path(location, task['location'])
+            path, travel_time = self.graph.dijkstra_shortest_path(
+                location, task['location']
+            )
 
             if path:
                 arrival_time = self.now + travel_time
@@ -474,13 +483,167 @@ class Baseline(Simulator):
 
         if closest_task is not None:
             self.dashers[dasher_id]['status'] = 'unavailable'
+            self.dashers[dasher_id]['current_task'] = closest_task
             self.available_tasks.remove(closest_task)
-            self.total_score += closest_task['reward']
+
             next_payload = {
                 'dasher_id': dasher_id,
                 'location': closest_task['location']
             }
-            self.schedule_at(closest_task['target_time'], DASHER_ARRIVAL, next_payload)
+
+            # schedule arrival at the task location after travel time
+            self.schedule_at(
+                self.now + min_travel_time,
+                DASHER_ARRIVAL,
+                next_payload
+            )
+
+    # actually didn't need a check_for_simulation_end since it has a set end
+    # handle_simulation_end can be exactly the same
+    def handle_simulation_end(self, payload: Any):
+        """
+        Stops the simulation.
+        """
+        print("SIMULATION_END event received. Stopping run loop.")
+        self.stop()
+
+    def get_total_score(self):
+        """ return the total system score """
+        return self.total_score
+
+class OpportunityCost(Simulator):
+    """Opportunity Cost policy simulator class"""
+    def __init__(self, graph: WeightedGraph, dashers, tasks):
+        super().__init__()
+        self.graph = graph
+        self.dashers_data = dashers
+        self.tasks_data = tasks
+        # initializing the simulation state
+        self.available_tasks = []
+        self.dashers = {}
+        self.total_score = 0.0
+        self.num_dashers = len(dashers)
+        self.dashers_exited = 0
+
+    # access tasklog here
+    def start_simulation(self):
+        """Initializes the simulation by scheduling initial events."""
+        # schedule all dashers' arrivals at their start locations
+        for i, dasher_info in enumerate(self.dashers_data):
+            dasher_id = i
+            self.dashers[dasher_id] = {
+                'location': dasher_info['start_location'],
+                'exit_time': dasher_info['exit_time'],
+                'status': 'available',  # either 'available' or 'unavailable'
+                'current_goal': None,  # current task at hand
+                'goal_expiration': None  # target time of current task
+            }
+
+            # schedule arrival in the system
+            payload = {
+                'dasher_id': dasher_id,
+                'location': dasher_info['start_location']
+            }
+            self.schedule_at(dasher_info['start_time'], DASHER_ARRIVAL, payload)
+
+        # schedule all task arrivals
+        for task in self.tasks_data:
+            payload = {
+                'task': task
+            }
+            self.schedule_at(task['appear_time'], TASK_ARRIVAL, payload)
+
+    def handle(self, event_id: Any, payload: Any):
+        if event_id == TASK_ARRIVAL:
+            self.handle_task_arrival(payload)
+
+        elif event_id == DASHER_ARRIVAL:
+            self.handle_dasher_arrival(payload)
+
+        elif event_id == SIMULATION_END:
+            self.handle_simulation_end(payload)
+
+    # probably less relevant because "requests" go in the opposite direction now
+    # -> yes this code ended up being much shorter (car request got repurposed into task arrival)
+    def handle_task_arrival(self, payload: Any):
+        task = payload['task']
+        self.available_tasks.append(task)
+
+    # opportunity cost algorithm, differs from baseline here
+    def handle_dasher_arrival(self, payload: Any):
+        dasher_id = payload['dasher_id']
+        location = payload['location']
+
+        # if the dasher has arrived, complete task
+        ## used copilot to refine the code here, because I kept on running into the issue where the simulation wouldn't correctly mark tasks as 'completed' and free up the dashers.
+        current_goal = self.dashers[dasher_id]['current_goal']
+        if current_goal is not None and location == current_goal['location']:
+            self.total_score += current_goal['reward']          
+            if current_goal in self.available_tasks:
+                self.available_tasks.remove(current_goal)          
+            self.dashers[dasher_id]['current_goal'] = None      
+            self.dashers[dasher_id]['goal_expiration'] = None   
+
+        # update dasher location and status
+        self.dashers[dasher_id]['location'] = location
+        self.dashers[dasher_id]['status'] = 'available'
+
+        # check if dasher has exited yet
+        if self.now >= self.dashers[dasher_id]['exit_time']:
+            self.dashers_exited += 1
+            if self.dashers_exited == self.num_dashers:
+                self.schedule_at(self.now, SIMULATION_END, None)
+            return
+
+        # 1- filter tasks that dasher can reach in time
+        feasible_tasks = []
+        for task in self.available_tasks:
+            path, travel_time = self.graph.dijkstra_shortest_path(location, task['location'])
+            if path:
+                arrival_time = self.now + travel_time
+                if arrival_time <= task['target_time'] and arrival_time <= self.dashers[dasher_id]['exit_time']:
+                    feasible_tasks.append((task, travel_time))  # CHANGED: removed arrival_time
+
+        if not feasible_tasks:
+            return  # no feasible tasks available
+        
+        # 2- prioritize feasible task with highest reward
+        feasible_tasks.sort(key=lambda x: x[0]['reward'], reverse=True)
+        best_task = None #must initialize before entering the loop
+        best_travel = None #same here
+
+        # 3- assign task if not already covered
+        # this prevents overcrowding at tasks, making sure that dashers are at least headed toward different tasks
+        for task, travel_time in feasible_tasks:
+            covered = False
+            for d in self.dashers.values():
+                if d['current_goal'] == task:
+                    covered = True
+                    break
+            if not covered:
+                best_task = task
+                best_travel = travel_time
+                break
+
+        # 4- if task is covered, fall back to closest feasible task
+        ## this fallback mechanism is not ideal, because it just immediately goes back to the closest task. But at the same time I think this allows the dashers to be freed up quickly for the next possible high-reward task
+        if best_task is None:
+            best_task, best_travel = min(feasible_tasks, key=lambda x: x[1])
+
+        # 5- assign task to dasher
+        self.dashers[dasher_id]['status'] = 'unavailable'
+        self.dashers[dasher_id]['current_goal'] = best_task
+        self.dashers[dasher_id]['goal_expiration'] = best_task['target_time']
+
+        self.schedule_at(
+            self.now + best_travel,
+            DASHER_ARRIVAL,
+            {
+                'dasher_id': dasher_id,
+                'location': best_task['location']
+            }
+        )
+
 
     # actually didn't need a check_for_simulation_end since it has a set end
     # handle_simulation_end can be exactly the same
@@ -513,9 +676,15 @@ if __name__ == "__main__":
 
     tasks = read_tasks(tasklog_file, appear_time_fixed)
 
-    sim = Baseline(graph, dashers, tasks)
-    sim.start_simulation()
-    sim.run()
+    sim_base = Baseline(graph, dashers, tasks)
+    sim_base.start_simulation()
+    sim_base.run()
+    base_total_score = sim_base.get_total_score()
+    print(f"\nBaseline Total Score: {base_total_score:.2f}")
 
-    total_score = sim.get_total_score()
-    print(f"\nTotal Score: {total_score:.2f}")
+    
+    sim_opp = OpportunityCost(graph, dashers, tasks)
+    sim_opp.start_simulation()
+    sim_opp.run()
+    opp_total_score = sim_opp.get_total_score()
+    print(f"\nOpportunity Cost Total Score: {opp_total_score:.2f}")
