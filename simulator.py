@@ -247,7 +247,7 @@ def read_graph(fname):
         node2 = int(edge[1].strip())
         weight = float(edge[2].strip())
 
-        print(node1, node2, weight)
+        #print(node1, node2, weight)
 
         graph.addEdge(node1, node2, weight)
     
@@ -327,65 +327,32 @@ class EventHandle:
 
 #should be fine as is
 class Simulator:
-    """Minimal discrete-event simulator.
-    Subclass and override handle(event_id, payload) with a switch-case.
-    """
+    """Minimal discrete-event simulator."""
     def __init__(self, start_time: float = 0.0) -> None:
         self.now = float(start_time)
-        self._queue: list[Tuple[float, int, Any, Any, EventHandle]] = []
+        self._queue = []
         self._seq = itertools.count()
         self._stopped = False
-        self.events_processed = 0
 
-    def schedule_at(self, time: float, event_id: Any, payload: Any = None) -> EventHandle:
+    def schedule_at(self, time, event_id, payload=None):
         if time < self.now:
             raise ValueError("Cannot schedule in the past")
         seq = next(self._seq)
-        h = EventHandle()
-        heapq.heappush(self._queue, (float(time), seq, event_id, payload, h))
-        return h
+        heapq.heappush(self._queue, (float(time), seq, event_id, payload))
 
-    def _pop_next(self):
-        while self._queue:
-            time, seq, event_id, payload, h = heapq.heappop(self._queue)
-            if not h.cancelled:
-                return time, event_id, payload
-            # skipped cancelled
-        return None
-
-    def step(self) -> bool:
-        if self._stopped:
-            return False
-        item = self._pop_next()
-        if item is None:
-            return False
-        time, event_id, payload = item
-        self.now = time
-        # dispatch to user-defined handler
-        self.handle(event_id, payload)
-        self.events_processed += 1
-        return True
-
-    def run(self, until: Optional[float] = None, max_events: Optional[int] = None) -> None:
+    def run(self):
         self._stopped = False
-        processed = 0
-        while not self._stopped:
-            if not self._queue:
-                break
-            if until is not None and self._queue[0][0] > until:
-                break
-            if max_events is not None and processed >= max_events:
-                break
-            if not self.step():
-                break
-            processed += 1
+        while not self._stopped and self._queue:
+            time, seq, event_id, payload = heapq.heappop(self._queue)
+            self.now = time
+            self.handle(event_id, payload)
 
-    def stop(self) -> None:
+    def stop(self):
         self._stopped = True
 
-    def handle(self, event_id: Any, payload: Any) -> None:
-        """Override in a subclass with a simple switch (if/elif) on event_id."""
-        raise NotImplementedError("Override handle(event_id, payload)")
+    def handle(self, event_id, payload):
+        raise NotImplementedError("Override handle()")
+    
 
 class Baseline(Simulator):
     def __init__(self, graph: WeightedGraph, dashers, tasks):
@@ -682,8 +649,8 @@ class BatchingSimulator(Simulator):
                 'status': 'available',
                 'current_goal': None
             }
-        payload = {'dasher_id': i, 'location': dasher_info['start_location']}
-        self.schedule_at(dasher_info['start_time'], DASHER_ARRIVAL, payload)
+            payload = {'dasher_id': i, 'location': dasher_info['start_location']}
+            self.schedule_at(dasher_info['start_time'], DASHER_ARRIVAL, payload)
 
         for task in self.tasks_data:
             self.schedule_at(task['appear_time'], TASK_ARRIVAL, {'task': task})
@@ -726,6 +693,7 @@ class BatchingSimulator(Simulator):
     
     def handle_batch_dispatch(self):
         """Dispatch all pending dashers."""
+        self.available_tasks = [t for t in self.available_tasks if t['target_time'] > self.now]
         for dasher_id in self.pending_dashers:
             if self.dashers[dasher_id]['status'] != 'available':
                 continue
@@ -772,25 +740,13 @@ if __name__ == "__main__":
     graph_file = "project_files/grid100.txt"
     dashers_file = "project_files/dashers.csv"
     tasklog_file = "project_files/tasklog.csv"
-    # from the assignment doc... "we can choose to keep the 'appear time' fixed
-    # (e.g. appears 20min before its reported completion)". So I added this feature?
     appear_time_fixed = 20
 
     graph = read_graph(graph_file)
-
     dashers = read_dashers(dashers_file)
-
     tasks = read_tasks(tasklog_file, appear_time_fixed)
 
-    sim_base = Baseline(graph, dashers, tasks)
-    sim_base.start_simulation()
-    sim_base.run()
-    base_total_score = sim_base.get_total_score()
-    print(f"\nBaseline Total Score: {base_total_score:.2f}")
-
-    
-    sim_opp = OpportunityCost(graph, dashers, tasks)
-    sim_opp.start_simulation()
-    sim_opp.run()
-    opp_total_score = sim_opp.get_total_score()
-    print(f"\nOpportunity Cost Total Score: {opp_total_score:.2f}")
+    sim = BatchingSimulator(graph, dashers, tasks, batch_interval=5)
+    sim.start_simulation()
+    sim.run()
+    print(f"Batching Total Score: {sim.get_total_score():.2f}")
