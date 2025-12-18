@@ -7,6 +7,7 @@ import random
 DASHER_ARRIVAL = "DASHER_ARRIVAL"
 TASK_ARRIVAL = "TASK_ARRIVAL"
 SIMULATION_END = "SIMULATION_END"
+BATCH_DISPATCH = "BATCH_DISPATCH"
 
 class WeightedGraph:
     '''A directed weighted graph using an adjacency list.'''
@@ -658,6 +659,111 @@ class OpportunityCost(Simulator):
         """ return the total system score """
         return self.total_score
 
+class BatchingSimulator(Simulator):
+    """Implements the Batching strategy as described in the submitted Smart Brain paper."""
+    def __init__(self, graph: WeightedGraph, dashers, tasks, batch_interval: int = 5):
+        super().__init__()
+        self.graph = graph
+        self.dashers_data = dashers
+        self.tasks_data = tasks
+        self.batch_interval = batch_interval
+        self.available_tasks = []
+        self.dashers = {}
+        self.total_score = 0.0
+        self.num_dashers = len(dashers)
+        self.dashers_exited = 0
+        self.pending_dashers = []
+    
+    def start_simulation(self):
+        for i, dasher_info in enumerate(self.dashers_data):
+            self.dashers[i] = {
+                'location': dasher_info['start_location'],
+                'exit_time': dasher_info['exit_time'],
+                'status': 'available',
+                'current_goal': None
+            }
+        payload = {'dasher_id': i, 'location': dasher_info['start_location']}
+        self.schedule_at(dasher_info['start_time'], DASHER_ARRIVAL, payload)
+
+        for task in self.tasks_data:
+            self.schedule_at(task['appear_time'], TASK_ARRIVAL, {'task': task})
+        
+        earliest = min(d['start_time'] for d in self.dashers_data)
+        latest = max(d['exit_time'] for d in self.dashers_data)
+        t = earliest
+        while t <= latest:
+            self.schedule_at(t, BATCH_DISPATCH, None)
+            t += self.batch_interval
+
+    def handle(self, event_id, payload):
+        if event_id == TASK_ARRIVAL:
+            self.available_tasks.append(payload['task'])
+        elif event_id == DASHER_ARRIVAL:
+            self.handle_dasher_arrival(payload)
+        elif event_id == BATCH_DISPATCH:
+            self.handle_batch_dispatch()
+        elif event_id == SIMULATION_END:
+            print("SIMULATION_END event received. Stopping run loop.")
+            self.stop()
+    
+    def handle_dasher_arrival(self, payload):
+        dasher_id = payload['dasher_id']
+        location = payload['location']
+        current_goal = self.dashers[dasher_id]['current_goal']
+        if current_goal is not None and location == current_goal['location']:
+            self.total_score += current_goal['reward']
+            if current_goal in self.available_tasks:
+                self.available_tasks.remove(current_goal)
+            self.dashers[dasher_id]['current_goal'] = None
+        self.dashers[dasher_id]['location'] = location
+        self.dashers[dasher_id]['status'] = 'available'
+        if self.now >= self.dashers[dasher_id]['exit_time']:
+            self.dashers_exited += 1
+            if self.dashers_exited == self.num_dashers:
+                self.schedule_at(self.now, SIMULATION_END, None)
+            return
+        self.pending_dashers.append(dasher_id)
+    
+    def handle_batch_dispatch(self):
+        """Dispatch all pending dashers."""
+        for dasher_id in self.pending_dashers:
+            if self.dashers[dasher_id]['status'] != 'available':
+                continue
+            if self.now >= self.dashers[dasher_id]['exit_time']:
+                continue
+            
+            location = self.dashers[dasher_id]['location']
+
+            feasible_tasks = []
+            for task in self.available_tasks:
+                path, travel_time = self.graph.dijkstra_shortest_path(location, task['location'])
+                if path:
+                    arrival_time = self.now + travel_time
+                    if arrival_time <= task['target_time'] and arrival_time <= self.dashers[dasher_id]['exit_time']:
+                        feasible_tasks.append((task, travel_time))
+            
+            if not feasible_tasks:
+                continue
+            
+            feasible_tasks.sort(key=lambda x: x[0]['reward'], reverse=True)
+
+            best_task, best_travel = None, None
+            for task, travel_time in feasible_tasks:
+                covered = any(d['current_goal'] == task for d in self.dashers.values())
+                if not covered:
+                    best_task, best_travel = task, travel_time
+                    break
+            if best_task is None:
+                best_task, best_travel = min(feasible_tasks, key=lambda x: x[1])
+
+            self.dashers[dasher_id]['status'] = 'unavailable'
+            self.dashers[dasher_id]['current_goal'] = best_task
+            self.schedule_at(self.now + best_travel, DASHER_ARRIVAL,
+                {'dasher_id': dasher_id, 'location': best_task['location']})
+        self.pending_dashers = []
+    
+    def get_total_score(self):
+        return self.total_score
 
 if __name__ == "__main__":
 ####used Gemini for this because I didn't really know how to write a main execution block
