@@ -5,6 +5,7 @@ import pandas as pd
 from prophet import Prophet
 import numpy as np
 import matplotlib.pyplot as plt
+from sklearn.metrics import mean_squared_error
 
 #predict for ech location 
 #predict the reward at given time
@@ -16,98 +17,6 @@ def _last_reward_col(df):
     if "reward" in df.columns:
         return "reward"
     raise RuntimeError("No reward column found in CSV")
-
-def predict_reward_at(vertex, t_minute, df_path="project_files/tasklog_reward.csv", reward_col=None):
-    """
-    Very simple: uses the 'minute' column as time (integer minutes).
-    - vertex: value in VERTEX column
-    - t_minute: integer minutes (same units as 'minute' column)
-    Returns predicted reward (float) for the task at the same VERTEX at minute t_minute.
-    """
-    df = pd.read_csv(df_path)
-    if "minute" not in df.columns or "VERTEX" not in df.columns:
-        raise RuntimeError("CSV must contain 'minute' and 'VERTEX' columns")
-
-    reward_col = reward_col or _last_reward_col(df)
-
-    group = df[df["VERTEX"] == vertex].copy()
-    if group.empty:
-        return float("nan")
-
-    y = pd.to_numeric(group[reward_col], errors="coerce").dropna()
-    if y.empty:
-        return float("nan")
-    if len(y) == 1:
-        return float(y.iloc[-1])
-
-    # Build datetimes from minute integers (fixed epoch)
-    origin = pd.Timestamp("1970-01-01")
-    ds = origin + pd.to_timedelta(group.loc[y.index, "minute"].astype(int), unit="m")
-    ts = pd.DataFrame({"ds": ds, "y": y.values})
-
-    m = Prophet(daily_seasonality=False, weekly_seasonality=False, yearly_seasonality=False)
-    m.fit(ts)
-
-    t_dt = origin + pd.to_timedelta(int(t_minute), unit="m")
-    future = pd.DataFrame({"ds": [t_dt]})
-    forecast = m.predict(future)
-    return float(forecast["yhat"].iloc[0])
-
-
-def predict_all_vertices(t_minute, df_path="project_files/tasklog_reward.csv", reward_col=None):
-    """
-    predict_reward_at all vertices: run prophet for all location
-    - vertex: value in VERTEX column
-    - t_minute: integer minutes (same units as 'minute' column)
-    Returns dataframe of predicted reward for task at all vertices at minute t_minute.
-    """
-    df = pd.read_csv(df_path)
-
-    if "minute" not in df.columns or "VERTEX" not in df.columns:
-        raise RuntimeError("CSV must contain 'minute' and 'VERTEX' columns")
-
-    reward_col = reward_col or _last_reward_col(df)
-
-    origin = pd.Timestamp("1970-01-01")
-    target_dt = origin + pd.to_timedelta(int(t_minute), unit="m")
-
-    predictions = []
-
-    for vertex, group in df.groupby("VERTEX"):
-        y = pd.to_numeric(group[reward_col], errors="coerce").dropna()
-
-        if len(y) == 0:
-            continue
-
-        if len(y) == 1:
-            pred = float(y.iloc[-1])
-            
-        else:
-            ds = origin + pd.to_timedelta(
-                group.loc[y.index, "minute"].astype(int),
-                unit="m"
-            )
-
-            ts = pd.DataFrame({"ds": ds, "y": y.values})
-
-            m = Prophet(
-                daily_seasonality=False,
-                weekly_seasonality=False,
-                yearly_seasonality=False
-            )
-            m.fit(ts)
-
-            future = pd.DataFrame({"ds": [target_dt]})
-            forecast = m.predict(future)
-            pred = max(0,float(forecast["yhat"].iloc[0]))
-
-        predictions.append({
-            "VERTEX": vertex,
-            "predicted_reward": pred
-        })
-
-    return pd.DataFrame(predictions)
-
 def read_tasks_and_write_rewards(input_fname, output_fname, appear_time_fixed):
     """
     Read CSV that has columns USERID,VERTEX,TIME,minute and write a copy with
@@ -211,9 +120,156 @@ def append_rewards(input_fname, appear_time_fixed):
 
     print(f"Appended {new_reward_col} to {input_fname}")
 
+def predict_reward_at(vertex, t_minute, df_path="project_files/tasklog_reward.csv", reward_col=None):
+    """
+    Very simple: uses the 'minute' column as time (integer minutes).
+    - vertex: value in VERTEX column
+    - t_minute: integer minutes (same units as 'minute' column)
+    Returns predicted reward (float) for the task at the same VERTEX at minute t_minute.
+    """
+    df = pd.read_csv(df_path)
+    if "minute" not in df.columns or "VERTEX" not in df.columns:
+        raise RuntimeError("CSV must contain 'minute' and 'VERTEX' columns")
 
+    reward_col = reward_col or _last_reward_col(df)
 
-# def graph_by_location(predictions):
+    group = df[df["VERTEX"] == vertex].copy()
+    if group.empty:
+        return float("nan")
+
+    y = pd.to_numeric(group[reward_col], errors="coerce").dropna()
+    if y.empty:
+        return float("nan")
+    if len(y) == 1:
+        return float(y.iloc[-1])
+
+    # Build datetimes from minute integers (fixed epoch)
+    origin = pd.Timestamp("1970-01-01")
+    ds = origin + pd.to_timedelta(group.loc[y.index, "minute"].astype(int), unit="m")
+    ts = pd.DataFrame({"ds": ds, "y": y.values})
+
+    m = Prophet(daily_seasonality=False, weekly_seasonality=False, yearly_seasonality=False)
+    m.fit(ts)
+
+    t_dt = origin + pd.to_timedelta(int(t_minute), unit="m")
+    future = pd.DataFrame({"ds": [t_dt]})
+    forecast = m.predict(future)
+    return float(forecast["yhat"].iloc[0])
+
+def predict_reward_at_range(vertex, t1, t2, df_path="project_files/tasklog_reward.csv", reward_col=None):
+    """
+    Predict rewards for a single vertex for all integer minutes from t1 to t2 .
+    Returns a DataFrame with columns ['minute', 'predicted_reward'].
+    """
+    predictions = []
+    
+    for t in range(t1, t2 + 1):
+        pred = predict_reward_at(vertex, t, df_path=df_path, reward_col=reward_col)
+        predictions.append({"minute": t, "predicted_reward": pred})
+    pred_df = pd.DataFrame(predictions)
+    print(pred_df)
+    return pred_df
+
+def predict_all_vertices(t_minute, df_path="project_files/tasklog_reward.csv", reward_col=None):
+    """
+    predict_reward_at all vertices: run prophet for all location
+    - vertex: value in VERTEX column
+    - t_minute: integer minutes (same units as 'minute' column)
+    Returns dataframe of predicted reward for task at all vertices at minute t_minute.
+    """
+    df = pd.read_csv(df_path)
+
+    if "minute" not in df.columns or "VERTEX" not in df.columns:
+        raise RuntimeError("CSV must contain 'minute' and 'VERTEX' columns")
+
+    reward_col = reward_col or _last_reward_col(df)
+
+    origin = pd.Timestamp("1970-01-01")
+    target_dt = origin + pd.to_timedelta(int(t_minute), unit="m")
+
+    predictions = []
+
+    for vertex, group in df.groupby("VERTEX"):
+        y = pd.to_numeric(group[reward_col], errors="coerce").dropna()
+
+        if len(y) == 0:
+            continue
+
+        if len(y) == 1:
+            pred = float(y.iloc[-1])
+            
+        else:
+            ds = origin + pd.to_timedelta(
+                group.loc[y.index, "minute"].astype(int),
+                unit="m"
+            )
+
+            ts = pd.DataFrame({"ds": ds, "y": y.values})
+
+            m = Prophet(
+                daily_seasonality=False,
+                weekly_seasonality=False,
+                yearly_seasonality=False
+            )
+            m.fit(ts)
+
+            future = pd.DataFrame({"ds": [target_dt]})
+            forecast = m.predict(future)
+            pred = max(0,float(forecast["yhat"].iloc[0]))
+
+        predictions.append({
+            "VERTEX": vertex,
+            "predicted_reward": pred
+        })
+
+    return pd.DataFrame(predictions)
+
+def get_historical_rewards_by_location(location, t1, t2, df_path="project_files/tasklog_reward.csv", reward_col=None):
+    """
+    Get historical rewards for a single vertex over a range of minutes [t1, t2].
+    Returns a DataFrame with columns ['minute', 'historical_reward'] suitable for plotting.
+    """
+    df = pd.read_csv(df_path)
+    
+    if "minute" not in df.columns or "VERTEX" not in df.columns:
+        raise RuntimeError("CSV must contain 'minute' and 'VERTEX' columns")
+    
+    reward_col = reward_col or _last_reward_col(df)
+    
+    # Filter for this vertex and the time range
+    vertex_df = df[df["VERTEX"] == location].copy()
+    vertex_df = vertex_df[(vertex_df["minute"] >= t1) & (vertex_df["minute"] <= t2)]
+    
+    # Ensure numeric rewards and drop NaNs
+    vertex_df[reward_col] = pd.to_numeric(vertex_df[reward_col], errors="coerce")
+    vertex_df = vertex_df.dropna(subset=[reward_col])
+    
+    # Create a DataFrame with the same structure as predicted
+    hist_df = vertex_df[["minute", reward_col]].rename(columns={reward_col: "historical_reward"})
+    
+    # If some minutes in range are missing, you can optionally fill them with 0
+    all_minutes = pd.DataFrame({"minute": range(t1, t2 + 1)})
+    hist_df = pd.merge(all_minutes, hist_df, on="minute", how="left").fillna(0)
+    print(hist_df[hist_df["historical_reward"] != 0])
+    return hist_df
+
+def graph_by_location(location,t1,t2):
+    """line graph of comparison of true and predicted rewards at the same location time ranging form t1 to t2"""
+    hist_df = get_historical_rewards_by_location(location, t1, t2)
+    pred_df = predict_reward_at_range(location, t1, t2)
+
+    mse = mean_squared_error(hist_df["historical_reward"], pred_df["predicted_reward"])
+    print(f"MSE for Vertex {location} over minutes {t1}-{t2}: {mse:.4f}")
+
+    plt.figure(figsize=(12, 5))
+    plt.plot(pred_df["minute"], pred_df["predicted_reward"], label="Predicted", color="skyblue", marker='o')
+    plt.plot(hist_df["minute"], hist_df["historical_reward"], label="Historical", color="gold", marker='x')
+    plt.xlabel("Minute")
+    plt.ylabel("Reward")
+    plt.title(f"Predicted vs Historical Rewards for Vertex {location}")
+    plt.legend()
+    plt.grid(True)
+    plt.show()
 
 def get_historical_rewards_by_time(time, df_path= "project_files/tasklog_reward.csv", reward_col=None) -> pd.DataFrame:
     """
@@ -239,36 +295,53 @@ def get_historical_rewards_by_time(time, df_path= "project_files/tasklog_reward.
     return pd.DataFrame(hist)
 
 
-def graph_by_time(predictions: pd.DataFrame, historical_rewards: pd.DataFrame, time: int):
+def graph_by_time(time: int):
     """
     Bar Chart Graph predicted rewards for all vertices at a given time.
     - x-axis: vertex (sorted ascending)
-    - y-axis: predicted reward
+    - y-axis: reward
     - color: blue for predicted, yellow for historical
+    - prints MSE in terminal
     """
 
-    # Merge predicted and historical rewards, sort by vertex
-    merged = pd.merge(predictions, historical_rewards, on="VERTEX", how="outer").fillna(0)
+    # Get data internally
+    predictions = predict_all_vertices(time)  # must return ['VERTEX', 'predicted_reward']
+    historical_rewards = get_historical_rewards_by_time(time)  # ['VERTEX', 'historical_reward']
+
+    # Merge predicted and historical rewards
+    merged = pd.merge(
+        predictions,
+        historical_rewards,
+        on="VERTEX",
+        how="outer"
+    ).fillna(0)
+
     merged = merged.sort_values("VERTEX")
-    
-    vertices = merged['VERTEX'].astype(str)
-    predicted = merged['predicted_reward']
-    historical = merged['historical_reward']
-    
+
+    vertices = merged["VERTEX"].astype(str)
+    predicted = merged["predicted_reward"]
+    historical = merged["historical_reward"]
+
+    # Compute MSE
+    mse = mean_squared_error(historical, predicted)
+    print(f"MSE for all vertices at time {time}: {mse:.4f}")
+
+    # Plot
     x = np.arange(len(vertices))
     width = 0.35
-    
+
     plt.figure(figsize=(14, 6))
-    plt.bar(x - width/2, predicted, width, label='Predicted', color='skyblue')
-    plt.bar(x + width/2, historical, width, label='Historical', color='gold')
-    
-    plt.xlabel('Vertex (Location ID)')
-    plt.ylabel('Reward')
-    plt.title(f'Predicted vs Historical Rewards at Time = {time}')
+    plt.bar(x - width / 2, predicted, width, label="Predicted", color="skyblue")
+    plt.bar(x + width / 2, historical, width, label="Historical", color="gold")
+
+    plt.xlabel("Vertex (Location ID)")
+    plt.ylabel("Reward")
+    plt.title(f"Predicted vs Historical Rewards at Time = {time}")
     plt.xticks(x, vertices, rotation=90)
     plt.legend()
     plt.tight_layout()
     plt.show()
+
 
 print("Writing file to:", os.path.abspath("project_files/tasklog_reward.csv"))
 
@@ -284,10 +357,7 @@ append_rewards("project_files/tasklog_reward.csv", appear_time_fixed=20)
 
 # Example usage (when run as script)
 if __name__ == "__main__":
-    predictions = predict_all_vertices(1227)
-    historical_rewards = get_historical_rewards_by_time(1227)
-    graph_by_time(predictions,historical_rewards,1227 )
-    
-
-    print(predictions)
+   
+    graph_by_time(1227)
+    graph_by_location(34,1210,1240)
 
